@@ -1,0 +1,12 @@
+{
+  "name": "Wildrose Invoice",
+  "short_name": "Wildrose",
+  "description": "Create and share Wildrose Furnace & Duct Cleaning invoices on site.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#07164f",
+  "icons": [
+    { "src": "./brand-mark.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
