@@ -1,6 +1,8 @@
 # Wildrose Invoice
 
-An iPhone-first production web app for Wildrose Furnace & Duct Cleaning. It opens on a real dashboard and supports blank invoice creation, editable customer details, the Wildrose service catalog, custom services, Alberta GST, invoice review, electronic customer approval, local invoice history, paid/unpaid status, business settings, and PDF sharing.
+An iPhone-first production web app for Wildrose Furnace & Duct Cleaning. It opens on a real dashboard and supports blank invoice creation, editable customer details, the Wildrose service catalog, custom services, Alberta GST, invoice review, electronic customer approval, local invoice history, paid/unpaid status, business settings, and branded PDF sharing.
+
+Generated PDFs use a professional Wildrose letterhead with the real company mark, navy and green theme, contact details, invoice metadata, customer and service tables, GST and totals, notes, customer approval, and a branded page footer.
 
 No customer or invoice examples are preloaded. Invoices and settings are stored locally in the browser on the current device.
 
@@ -48,5 +50,6 @@ The Pages workflow uses `npm run build:pages`; no external hosting credentials o
 
 - `npm run check:runtime` verifies the locked project runtime files.
 - `npm run build` verifies TypeScript and the production bundle.
+- `npm run test:pdf` verifies that the branded invoice generator produces a valid, non-empty PDF.
 - `npm run test:sites` verifies the packaged worker and app-route fallback.
 - `design-qa.md` records the visual comparison and interaction QA evidence.

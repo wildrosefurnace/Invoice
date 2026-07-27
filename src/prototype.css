@@ -283,6 +283,8 @@ textarea { height: auto; min-height: 104px; padding: 12px; resize: vertical; }
 .paper-brand > div { display: grid; justify-items: end; gap: 4px; }
 .paper-brand > div span, .billing-grid section > span, .invoice-notes > span, .signature-preview > span { color: var(--wr-green); font-size: 9px; font-weight: 850; letter-spacing: 1px; }
 .paper-brand > div strong { font-size: 12px; text-align: right; }
+.paper-contact-line { display: flex; flex-wrap: wrap; justify-content: center; gap: 5px 14px; padding: 10px 0; border-bottom: 1px solid var(--wr-line); color: var(--wr-text); font-size: 8.5px; line-height: 1.35; text-align: center; }
+.paper-contact-line span:not(:last-child)::after { margin-left: 14px; color: var(--wr-green); content: "•"; }
 .invoice-meta-grid { display: grid; grid-template-columns: 1fr 1fr 96px; gap: 10px; padding: 16px 0; border-bottom: 1px solid var(--wr-line); }
 .invoice-meta-grid > div, .invoice-meta-grid > label { min-width: 0; display: grid; gap: 5px; }
 .invoice-meta-grid span { color: var(--wr-text); font-size: 9px; font-weight: 750; text-transform: uppercase; }
