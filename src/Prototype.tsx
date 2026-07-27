@@ -59,6 +59,8 @@ type BusinessSettings = {
   email: string;
   phone: string;
   address: string;
+  website: string;
+  hours: string;
   taxRate: number;
 };
 
@@ -106,8 +108,10 @@ const EMPTY_CUSTOMER: Customer = {
 const DEFAULT_SETTINGS: BusinessSettings = {
   businessName: "Wildrose Furnace & Duct Cleaning",
   email: "",
-  phone: "",
-  address: "Edmonton, Alberta",
+  phone: "(780) 807-0143 · (587) 566-9095",
+  address: "Edmonton & nearby areas, Alberta",
+  website: "wildrosefurnace.com",
+  hours: "Open 9 AM – 9 PM · 7 days a week",
   taxRate: 5,
 };
 
@@ -169,7 +173,15 @@ function loadInvoices(): Invoice[] {
 function loadSettings(): BusinessSettings {
   try {
     const stored = localStorage.getItem(SETTINGS_KEY);
-    return stored ? { ...DEFAULT_SETTINGS, ...JSON.parse(stored) as BusinessSettings } : DEFAULT_SETTINGS;
+    if (!stored) return DEFAULT_SETTINGS;
+    const saved = JSON.parse(stored) as Partial<BusinessSettings>;
+    return {
+      ...DEFAULT_SETTINGS,
+      ...saved,
+      phone: saved.phone?.trim() || DEFAULT_SETTINGS.phone,
+      website: saved.website?.trim() || DEFAULT_SETTINGS.website,
+      hours: saved.hours?.trim() || DEFAULT_SETTINGS.hours,
+    };
   } catch {
     return DEFAULT_SETTINGS;
   }
@@ -451,6 +463,11 @@ function ReviewInvoice({ invoice, settings, onChange, onBack, onEdit, onDelete, 
       <main className="page-scroll review-scroll">
         <section className="invoice-paper">
           <div className="paper-brand"><BrandLockup /><div><span>INVOICE</span><strong>{invoice.number}</strong></div></div>
+          <div className="paper-contact-line">
+            <span>{settings.phone}</span>
+            <span>{settings.website}</span>
+            <span>{settings.hours}</span>
+          </div>
           <div className="invoice-meta-grid">
             <div><span>Issued</span><strong>{displayDate(invoice.createdAt)}</strong></div>
             <div><span>Service date</span><strong>{displayDate(invoice.serviceDate)}</strong></div>
@@ -531,6 +548,8 @@ function SettingsScreen({ settings, onChange, onNavigate }: { settings: Business
           <Field label="Business address"><input value={settings.address} placeholder="Business address" onChange={(event) => onChange({ ...settings, address: event.target.value })} /></Field>
           <Field label="Phone"><input inputMode="tel" value={settings.phone} placeholder="Business phone" onChange={(event) => onChange({ ...settings, phone: event.target.value })} /></Field>
           <Field label="Email"><input type="email" value={settings.email} placeholder="Business email" onChange={(event) => onChange({ ...settings, email: event.target.value })} /></Field>
+          <Field label="Website"><input inputMode="url" value={settings.website} placeholder="wildrosefurnace.com" onChange={(event) => onChange({ ...settings, website: event.target.value })} /></Field>
+          <Field label="Business hours"><input value={settings.hours} placeholder="Open 9 AM – 9 PM · 7 days a week" onChange={(event) => onChange({ ...settings, hours: event.target.value })} /></Field>
           <Field label="Default GST rate"><span className="percent-input"><input inputMode="decimal" value={settings.taxRate} onChange={(event) => onChange({ ...settings, taxRate: Math.max(0, Number(event.target.value) || 0) })} /><span>%</span></span></Field>
         </section>
         <aside className="storage-note"><GearIcon /><div><strong>Device-only storage</strong><span>Invoices are saved in this browser. Cloud backup and multi-device access are not included yet.</span></div></aside>
@@ -540,46 +559,273 @@ function SettingsScreen({ settings, onChange, onNavigate }: { settings: Business
   );
 }
 
-function pdfBlob(invoice: Invoice, settings: BusinessSettings) {
+let brandMarkPngPromise: Promise<string> | null = null;
+
+function brandMarkPng() {
+  if (brandMarkPngPromise) return brandMarkPngPromise;
+  brandMarkPngPromise = new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 240;
+      canvas.height = 240;
+      const context = canvas.getContext("2d");
+      if (!context) {
+        reject(new Error("Invoice logo could not be prepared."));
+        return;
+      }
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL("image/png"));
+    };
+    image.onerror = () => reject(new Error("Invoice logo could not be loaded."));
+    image.src = `${import.meta.env.BASE_URL}brand-mark-pdf.png`;
+  });
+  return brandMarkPngPromise;
+}
+
+export async function pdfBlob(invoice: Invoice, settings: BusinessSettings, logoOverride?: string) {
+  const { jsPDF } = await import("jspdf");
   const values = calculate(invoice);
-  const customerAddress = `${invoice.customer.address}, ${invoice.customer.city}, ${invoice.customer.province} ${invoice.customer.postalCode}`;
-  const lines = [
-    settings.businessName.toUpperCase(),
-    `Invoice ${invoice.number}`,
-    `Issued ${displayDate(invoice.createdAt)} | Service ${displayDate(invoice.serviceDate)}`,
-    `Bill to: ${invoice.customer.name}`,
-    customerAddress,
-    "",
-    ...invoice.items.map((item) => `${item.name} | ${item.quantity} x ${money(item.unitPrice)} | ${money(item.quantity * item.unitPrice)}`),
-    "",
-    `Subtotal: ${money(values.subtotal)}`,
-    `GST (${invoice.taxRate}%): ${money(values.tax)}`,
-    `TOTAL CAD: ${money(values.total)}`,
-    "",
-    ...(invoice.signature ? [`Approved by ${invoice.signature} on ${displayDate(invoice.signedAt || invoice.createdAt)}`] : ["Customer signature: pending"]),
-    ...(invoice.notes ? ["", `Note: ${invoice.notes}`] : []),
+  const documentPdf = new jsPDF({ orientation: "portrait", unit: "pt", format: "letter", compress: true });
+  const pageWidth = documentPdf.internal.pageSize.getWidth();
+  const pageHeight = documentPdf.internal.pageSize.getHeight();
+  const margin = 44;
+  const contentWidth = pageWidth - margin * 2;
+  const navy: [number, number, number] = [7, 22, 79];
+  const green: [number, number, number] = [31, 127, 39];
+  const greenSoft: [number, number, number] = [238, 247, 237];
+  const text: [number, number, number] = [75, 84, 107];
+  const line: [number, number, number] = [221, 226, 234];
+  const logo = logoOverride ?? await brandMarkPng();
+  let y = 0;
+
+  const setText = (colour: [number, number, number]) => documentPdf.setTextColor(...colour);
+  const setFill = (colour: [number, number, number]) => documentPdf.setFillColor(...colour);
+  const setDraw = (colour: [number, number, number]) => documentPdf.setDrawColor(...colour);
+  const rightText = (value: string, x: number, atY: number) => documentPdf.text(value, x, atY, { align: "right" });
+
+  const addLetterhead = (continuation = false) => {
+    setFill(green);
+    documentPdf.rect(0, 0, pageWidth, 7, "F");
+    documentPdf.addImage(logo, "PNG", margin, 28, 45, 45);
+    documentPdf.setFont("helvetica", "bold");
+    documentPdf.setFontSize(18);
+    setText(navy);
+    documentPdf.text("WILDROSE", margin + 55, 48);
+    documentPdf.setFontSize(7.4);
+    setText(green);
+    documentPdf.text("FURNACE & DUCT CLEANING", margin + 55, 62);
+    documentPdf.setFont("helvetica", "normal");
+    documentPdf.setFontSize(7.5);
+    setText(text);
+    documentPdf.text("CLEAN AIR STARTS HERE", margin + 55, 72);
+
+    documentPdf.setFont("helvetica", "bold");
+    documentPdf.setFontSize(continuation ? 12 : 20);
+    setText(navy);
+    rightText(continuation ? "INVOICE · CONTINUED" : "INVOICE", pageWidth - margin, 43);
+    documentPdf.setFontSize(9);
+    setText(green);
+    rightText(invoice.number, pageWidth - margin, 59);
+    documentPdf.setFont("helvetica", "normal");
+    documentPdf.setFontSize(7.5);
+    setText(text);
+    rightText("All amounts in Canadian dollars", pageWidth - margin, 72);
+
+    setDraw(navy);
+    documentPdf.setLineWidth(1.5);
+    documentPdf.line(margin, 87, pageWidth - margin, 87);
+    documentPdf.setFontSize(8);
+    setText(text);
+    const contact = [settings.phone, settings.website, settings.hours].filter(Boolean).join("   •   ");
+    documentPdf.text(contact, pageWidth / 2, 101, { align: "center", maxWidth: contentWidth });
+    y = 120;
+  };
+
+  const drawTableHeader = () => {
+    setFill(navy);
+    documentPdf.roundedRect(margin, y, contentWidth, 25, 4, 4, "F");
+    documentPdf.setFont("helvetica", "bold");
+    documentPdf.setFontSize(8);
+    documentPdf.setTextColor(255, 255, 255);
+    documentPdf.text("SERVICE", margin + 10, y + 16);
+    rightText("QTY", 420, y + 16);
+    rightText("PRICE", 493, y + 16);
+    rightText("TOTAL", pageWidth - margin - 10, y + 16);
+    y += 25;
+  };
+
+  const addPageForItems = () => {
+    documentPdf.addPage("letter", "portrait");
+    addLetterhead(true);
+    drawTableHeader();
+  };
+
+  addLetterhead();
+
+  const metaY = y;
+  const metaWidth = (contentWidth - 18) / 3;
+  const meta = [
+    ["ISSUED", displayDate(invoice.createdAt)],
+    ["SERVICE DATE", displayDate(invoice.serviceDate)],
+    ["STATUS", invoice.status.toUpperCase()],
   ];
-  const escape = (value: string) => value.replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)").replaceAll("\n", " ");
-  const stream = ["BT", "/F1 13 Tf", "48 748 Td", ...lines.flatMap((line, index) => [index === 0 ? "" : "0 -25 Td", `(${escape(line)}) Tj`]), "ET"].filter(Boolean).join("\n");
-  const objects = [
-    "<< /Type /Catalog /Pages 2 0 R >>",
-    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
-    `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
-    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+  meta.forEach(([label, value], index) => {
+    const x = margin + index * (metaWidth + 9);
+    setFill(index === 2 ? greenSoft : [247, 248, 250]);
+    documentPdf.roundedRect(x, metaY, metaWidth, 42, 5, 5, "F");
+    documentPdf.setFont("helvetica", "bold");
+    documentPdf.setFontSize(7);
+    setText(index === 2 ? green : text);
+    documentPdf.text(label, x + 10, metaY + 14);
+    documentPdf.setFontSize(9.5);
+    setText(navy);
+    documentPdf.text(value, x + 10, metaY + 30, { maxWidth: metaWidth - 20 });
+  });
+  y += 58;
+
+  const billingGap = 20;
+  const billingWidth = (contentWidth - billingGap) / 2;
+  const customerAddress = [
+    invoice.customer.address,
+    [invoice.customer.city, invoice.customer.province, invoice.customer.postalCode].filter(Boolean).join(" "),
+    invoice.customer.phone,
+    invoice.customer.email,
+  ].filter(Boolean);
+  const businessDetails = [settings.businessName, settings.address, settings.phone, settings.email, settings.website].filter(Boolean);
+  const billSections: Array<{ label: string; lines: string[]; x: number }> = [
+    { label: "FROM", lines: businessDetails, x: margin },
+    { label: "BILL TO", lines: [invoice.customer.name, ...customerAddress], x: margin + billingWidth + billingGap },
   ];
-  let body = "%PDF-1.4\n";
-  const offsets = [0];
-  objects.forEach((object, index) => { offsets.push(body.length); body += `${index + 1} 0 obj\n${object}\nendobj\n`; });
-  const xref = body.length;
-  body += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
-  body += offsets.slice(1).map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`).join("");
-  body += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
-  return new Blob([body], { type: "application/pdf" });
+  billSections.forEach((section) => {
+    documentPdf.setFont("helvetica", "bold");
+    documentPdf.setFontSize(7.5);
+    setText(green);
+    documentPdf.text(section.label, section.x, y);
+    section.lines.forEach((value, index) => {
+      documentPdf.setFont("helvetica", index === 0 ? "bold" : "normal");
+      documentPdf.setFontSize(index === 0 ? 10.5 : 8.5);
+      setText(index === 0 ? navy : text);
+      documentPdf.text(value, section.x, y + 17 + index * 12, { maxWidth: billingWidth - 4 });
+    });
+  });
+  y += Math.max(businessDetails.length, customerAddress.length + 1) * 12 + 34;
+
+  drawTableHeader();
+  invoice.items.forEach((item) => {
+    documentPdf.setFont("helvetica", "bold");
+    documentPdf.setFontSize(9);
+    const nameLines = documentPdf.splitTextToSize(item.name, 292) as string[];
+    documentPdf.setFont("helvetica", "normal");
+    documentPdf.setFontSize(7.5);
+    const descriptionLines = item.description ? documentPdf.splitTextToSize(item.description, 292) as string[] : [];
+    const rowHeight = Math.max(38, nameLines.length * 10 + descriptionLines.length * 9 + 16);
+    if (y + rowHeight > pageHeight - 70) addPageForItems();
+
+    setDraw(line);
+    documentPdf.setLineWidth(0.7);
+    documentPdf.line(margin, y + rowHeight, pageWidth - margin, y + rowHeight);
+    documentPdf.setFont("helvetica", "bold");
+    documentPdf.setFontSize(9);
+    setText(navy);
+    documentPdf.text(nameLines, margin + 10, y + 15);
+    if (descriptionLines.length) {
+      documentPdf.setFont("helvetica", "normal");
+      documentPdf.setFontSize(7.5);
+      setText(text);
+      documentPdf.text(descriptionLines, margin + 10, y + 15 + nameLines.length * 10 + 2);
+    }
+    documentPdf.setFont("helvetica", "normal");
+    documentPdf.setFontSize(9);
+    setText(navy);
+    rightText(String(item.quantity), 420, y + 18);
+    rightText(money(item.unitPrice), 493, y + 18);
+    documentPdf.setFont("helvetica", "bold");
+    rightText(money(item.quantity * item.unitPrice), pageWidth - margin - 10, y + 18);
+    y += rowHeight;
+  });
+
+  if (y + 188 > pageHeight - 48) {
+    documentPdf.addPage("letter", "portrait");
+    addLetterhead(true);
+  }
+
+  const totalsX = pageWidth - margin - 215;
+  const totalsY = y + 18;
+  setFill(greenSoft);
+  documentPdf.roundedRect(totalsX, totalsY, 215, 91, 7, 7, "F");
+  const totals = [
+    ["Subtotal", money(values.subtotal)],
+    [`GST (${invoice.taxRate}%)`, money(values.tax)],
+  ];
+  totals.forEach(([label, value], index) => {
+    documentPdf.setFont("helvetica", "normal");
+    documentPdf.setFontSize(9);
+    setText(text);
+    documentPdf.text(label, totalsX + 13, totalsY + 21 + index * 20);
+    documentPdf.setFont("helvetica", "bold");
+    setText(navy);
+    rightText(value, totalsX + 202, totalsY + 21 + index * 20);
+  });
+  setDraw(green);
+  documentPdf.line(totalsX + 12, totalsY + 52, totalsX + 203, totalsY + 52);
+  documentPdf.setFont("helvetica", "bold");
+  documentPdf.setFontSize(11);
+  setText(navy);
+  documentPdf.text("TOTAL CAD", totalsX + 13, totalsY + 75);
+  documentPdf.setFontSize(15);
+  setText(green);
+  rightText(money(values.total), totalsX + 202, totalsY + 75);
+  y = totalsY + 110;
+
+  if (invoice.notes) {
+    documentPdf.setFont("helvetica", "bold");
+    documentPdf.setFontSize(7.5);
+    setText(green);
+    documentPdf.text("NOTE", margin, y);
+    documentPdf.setFont("helvetica", "normal");
+    documentPdf.setFontSize(8.5);
+    setText(text);
+    const noteLines = documentPdf.splitTextToSize(invoice.notes, contentWidth) as string[];
+    documentPdf.text(noteLines, margin, y + 15);
+    y += noteLines.length * 10 + 26;
+  }
+
+  setDraw(line);
+  documentPdf.line(margin, y, pageWidth - margin, y);
+  y += 18;
+  documentPdf.setFont("helvetica", "bold");
+  documentPdf.setFontSize(7.5);
+  setText(green);
+  documentPdf.text("CUSTOMER APPROVAL", margin, y);
+  documentPdf.setFont(invoice.signature ? "times" : "helvetica", invoice.signature ? "italic" : "normal");
+  documentPdf.setFontSize(invoice.signature ? 18 : 8.5);
+  setText(invoice.signature ? navy : text);
+  documentPdf.text(invoice.signature || "Customer signature pending", margin, y + 22);
+  if (invoice.signature) {
+    documentPdf.setFont("helvetica", "normal");
+    documentPdf.setFontSize(7.5);
+    setText(text);
+    documentPdf.text(`Electronically approved ${displayDate(invoice.signedAt || invoice.createdAt)}`, margin, y + 36);
+  }
+
+  const pages = documentPdf.getNumberOfPages();
+  for (let page = 1; page <= pages; page += 1) {
+    documentPdf.setPage(page);
+    setFill(navy);
+    documentPdf.rect(0, pageHeight - 27, pageWidth, 27, "F");
+    documentPdf.setFont("helvetica", "normal");
+    documentPdf.setFontSize(7.5);
+    documentPdf.setTextColor(255, 255, 255);
+    documentPdf.text(`${settings.website}   •   ${settings.phone}`, margin, pageHeight - 11);
+    documentPdf.text(`Page ${page} of ${pages}`, pageWidth - margin, pageHeight - 11, { align: "right" });
+  }
+
+  return documentPdf.output("blob");
 }
 
 async function shareInvoicePdf(invoice: Invoice, settings: BusinessSettings) {
-  const file = new File([pdfBlob(invoice, settings)], `Wildrose-Invoice-${invoice.number}.pdf`, { type: "application/pdf" });
+  const file = new File([await pdfBlob(invoice, settings)], `Wildrose-Invoice-${invoice.number}.pdf`, { type: "application/pdf" });
   if (navigator.share && navigator.canShare?.({ files: [file] })) {
     try {
       await navigator.share({ title: `Wildrose Invoice ${invoice.number}`, text: `Invoice for ${invoice.customer.name}`, files: [file] });
