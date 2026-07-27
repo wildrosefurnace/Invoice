@@ -5,6 +5,8 @@ import {
   ClipboardCopyIcon,
   Cross2Icon,
   DashboardIcon,
+  EnvelopeClosedIcon,
+  ExitIcon,
   FileTextIcon,
   GearIcon,
   HomeIcon,
@@ -18,6 +20,21 @@ import {
   TrashIcon,
 } from "@radix-ui/react-icons";
 import { useEffect, useState, type ReactNode } from "react";
+import type { Session } from "@supabase/supabase-js";
+import {
+  createCloudInvoiceDraft,
+  deleteCloudInvoice,
+  ensureInvoiceCounterAtLeast,
+  getCloudSession,
+  isCloudConfigured,
+  loadCloudState,
+  saveCloudInvoice,
+  saveCloudInvoices,
+  saveCloudSettings,
+  sendMagicLink,
+  signOutCloud,
+  watchCloudSession,
+} from "./cloud";
 
 type Screen = "dashboard" | "invoices" | "editor" | "review" | "signature" | "success" | "settings";
 type InvoiceStatus = "Draft" | "Unpaid" | "Paid";
@@ -66,6 +83,7 @@ type BusinessSettings = {
 
 const STORAGE_KEY = "wildrose-invoices-v2";
 const SETTINGS_KEY = "wildrose-settings-v1";
+const LOCAL_COUNTER_KEY = "wildrose-invoice-counter-v1";
 
 const SERVICE_CATALOG: Omit<LineItem, "id" | "quantity">[] = [
   {
@@ -135,11 +153,11 @@ function displayDate(value: string) {
   return new Intl.DateTimeFormat("en-CA", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(new Date(`${value}T12:00:00Z`));
 }
 
-function createInvoice(sequence: number, taxRate: number): Invoice {
+function createInvoice(invoiceNumber: string, taxRate: number): Invoice {
   const today = localDate();
   return {
     id: crypto.randomUUID(),
-    number: `WR-${today.replaceAll("-", "")}-${String(sequence).padStart(3, "0")}`,
+    number: invoiceNumber,
     createdAt: today,
     serviceDate: today,
     customer: { ...EMPTY_CUSTOMER },
@@ -149,6 +167,47 @@ function createInvoice(sequence: number, taxRate: number): Invoice {
     status: "Draft",
     signature: "",
   };
+}
+
+function nextLocalInvoiceNumber() {
+  const previous = Number(localStorage.getItem(LOCAL_COUNTER_KEY)) || 1000;
+  const next = previous + 1;
+  localStorage.setItem(LOCAL_COUNTER_KEY, String(next));
+  return `WR-${next}`;
+}
+
+function highestPermanentInvoiceNumber(invoices: Invoice[]) {
+  return invoices.reduce((highest, invoice) => {
+    const match = /^WR-(\d+)$/.exec(invoice.number);
+    return match ? Math.max(highest, Number(match[1])) : highest;
+  }, 1000);
+}
+
+async function mergeLocalInvoicesWithCloud(localInvoices: Invoice[], cloudInvoices: Invoice[]) {
+  const cloudIds = new Set(cloudInvoices.map((invoice) => invoice.id));
+  const usedNumbers = new Set(cloudInvoices.map((invoice) => invoice.number));
+  const localOnly = localInvoices.filter((invoice) => !cloudIds.has(invoice.id)).reverse();
+  const allKnownInvoices = [...cloudInvoices, ...localOnly];
+  await ensureInvoiceCounterAtLeast(highestPermanentInvoiceNumber(allKnownInvoices));
+
+  const imported: Invoice[] = [];
+  for (const invoice of localOnly) {
+    if (usedNumbers.has(invoice.number)) {
+      const replacement = await createCloudInvoiceDraft({ ...invoice, number: "" });
+      const renumbered = { ...invoice, number: replacement };
+      imported.push(renumbered);
+      usedNumbers.add(replacement);
+    } else {
+      imported.push(invoice);
+      usedNumbers.add(invoice.number);
+    }
+  }
+  await saveCloudInvoices(imported);
+
+  return [...cloudInvoices, ...imported].sort((left, right) => {
+    const dateOrder = right.createdAt.localeCompare(left.createdAt);
+    return dateOrder || right.number.localeCompare(left.number);
+  });
 }
 
 function calculate(invoice: Invoice) {
@@ -161,6 +220,7 @@ function loadInvoices(): Invoice[] {
   try {
     if (import.meta.env.DEV && new URLSearchParams(window.location.search).has("reset")) {
       localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(LOCAL_COUNTER_KEY);
       return [];
     }
     const stored = localStorage.getItem(STORAGE_KEY);
@@ -197,6 +257,68 @@ function BrandLockup() {
       </span>
     </div>
   );
+}
+
+function AuthenticationScreen() {
+  const [email, setEmail] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!email.trim()) return;
+    setSending(true);
+    setError("");
+    try {
+      await sendMagicLink(email.trim());
+      setSent(true);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The sign-in link could not be sent.");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div className="auth-page">
+      <main className="auth-card">
+        <BrandLockup />
+        <div className="auth-icon"><EnvelopeClosedIcon /></div>
+        <p className="eyebrow">SECURE CLOUD ACCESS</p>
+        <h1>{sent ? "Check your email." : "Sign in to your invoices."}</h1>
+        {sent ? (
+          <>
+            <p>We sent a secure sign-in link to <strong>{email}</strong>. Open it on this device to continue.</p>
+            <button className="secondary-button" type="button" onClick={() => setSent(false)}>Use another email</button>
+          </>
+        ) : (
+          <form onSubmit={submit}>
+            <p>Use the business owner’s email. No password is required.</p>
+            <Field label="Email address" required>
+              <input type="email" autoComplete="email" value={email} placeholder="owner@example.com" onChange={(event) => setEmail(event.target.value)} />
+            </Field>
+            {error && <p className="form-error" role="alert">{error}</p>}
+            <button className="primary-button" type="submit" disabled={sending || !email.trim()}>
+              {sending ? "Sending…" : "Email me a sign-in link"}
+            </button>
+          </form>
+        )}
+        <p className="auth-privacy">Invoices are private and only available to the signed-in account.</p>
+      </main>
+    </div>
+  );
+}
+
+function CloudStatusNote({ status }: { status: "local" | "loading" | "saving" | "synced" | "error" }) {
+  const content = {
+    local: ["Device storage", "Cloud database setup is still required."],
+    loading: ["Loading cloud records", "Retrieving invoices and settings…"],
+    saving: ["Saving securely", "Changes are being backed up to the cloud."],
+    synced: ["Cloud backup active", "Invoices and numbering are synchronized across devices."],
+    error: ["Cloud connection needs attention", "Your latest changes remain cached on this device."],
+  }[status];
+  return <aside className={`storage-note cloud-status cloud-status-${status}`}><CheckCircledIcon /><div><strong>{content[0]}</strong><span>{content[1]}</span></div></aside>;
 }
 
 function IconButton({ label, children, onClick }: { label: string; children: ReactNode; onClick: () => void }) {
@@ -260,7 +382,7 @@ function InvoiceCard({ invoice, onOpen }: { invoice: Invoice; onOpen: () => void
   );
 }
 
-function Dashboard({ invoices, onNew, onOpen, onNavigate }: { invoices: Invoice[]; onNew: () => void; onOpen: (invoice: Invoice) => void; onNavigate: (screen: Screen) => void }) {
+function Dashboard({ invoices, onNew, onOpen, onNavigate, syncStatus }: { invoices: Invoice[]; onNew: () => void; onOpen: (invoice: Invoice) => void; onNavigate: (screen: Screen) => void; syncStatus: "local" | "loading" | "saving" | "synced" | "error" }) {
   const paid = invoices.filter((invoice) => invoice.status === "Paid").reduce((sum, invoice) => sum + calculate(invoice).total, 0);
   const outstanding = invoices.filter((invoice) => invoice.status === "Unpaid").reduce((sum, invoice) => sum + calculate(invoice).total, 0);
   return (
@@ -273,6 +395,8 @@ function Dashboard({ invoices, onNew, onOpen, onNavigate }: { invoices: Invoice[
           <p>Create accurate invoices, collect approval, and send a PDF before leaving the customer’s home.</p>
           <button className="primary-button hero-button" type="button" onClick={onNew}><PlusIcon /> New invoice</button>
         </section>
+
+        <CloudStatusNote status={syncStatus} />
 
         <section className="metric-grid" aria-label="Invoice totals">
           <article><span>Outstanding</span><strong>{money(outstanding)}</strong><small>{invoices.filter((invoice) => invoice.status === "Unpaid").length} unpaid</small></article>
@@ -518,7 +642,7 @@ function SignatureScreen({ invoice, onBack, onComplete }: { invoice: Invoice; on
   );
 }
 
-function SuccessScreen({ invoice, onShare, onDone }: { invoice: Invoice; onShare: () => void; onDone: () => void }) {
+function SuccessScreen({ invoice, cloudEnabled, onShare, onDone }: { invoice: Invoice; cloudEnabled: boolean; onShare: () => void; onDone: () => void }) {
   return (
     <div className="app-page success-page">
       <main className="success-content">
@@ -526,7 +650,7 @@ function SuccessScreen({ invoice, onShare, onDone }: { invoice: Invoice; onShare
         <span className="success-check"><CheckCircledIcon /></span>
         <p className="eyebrow">INVOICE SAVED</p>
         <h1>Ready to send.</h1>
-        <p>{invoice.number} is saved on this device{invoice.signature ? ` and signed by ${invoice.signature}` : ""}.</p>
+        <p>{invoice.number} is saved {cloudEnabled ? "to the secure cloud" : "on this device"}{invoice.signature ? ` and signed by ${invoice.signature}` : ""}.</p>
         <Totals invoice={invoice} strong />
         <button className="primary-button" type="button" onClick={onShare}><Share2Icon /> Share invoice PDF</button>
         <button className="secondary-button" type="button" onClick={onDone}>Back to home</button>
@@ -535,14 +659,14 @@ function SuccessScreen({ invoice, onShare, onDone }: { invoice: Invoice; onShare
   );
 }
 
-function SettingsScreen({ settings, onChange, onNavigate }: { settings: BusinessSettings; onChange: (settings: BusinessSettings) => void; onNavigate: (screen: Screen) => void }) {
+function SettingsScreen({ settings, syncStatus, userEmail, onChange, onNavigate, onSignOut }: { settings: BusinessSettings; syncStatus: "local" | "loading" | "saving" | "synced" | "error"; userEmail?: string; onChange: (settings: BusinessSettings) => void; onNavigate: (screen: Screen) => void; onSignOut?: () => void }) {
   return (
     <div className="app-page has-bottom-nav">
       <AppHeader />
       <main className="page-scroll settings-page">
         <p className="eyebrow">BUSINESS PROFILE</p>
         <h1>Settings</h1>
-        <p className="page-lede">These details appear on every new invoice and stay on this device.</p>
+        <p className="page-lede">These details appear on every new invoice and synchronize with the business account.</p>
         <section className="settings-card">
           <Field label="Business name"><input value={settings.businessName} onChange={(event) => onChange({ ...settings, businessName: event.target.value })} /></Field>
           <Field label="Business address"><input value={settings.address} placeholder="Business address" onChange={(event) => onChange({ ...settings, address: event.target.value })} /></Field>
@@ -552,7 +676,13 @@ function SettingsScreen({ settings, onChange, onNavigate }: { settings: Business
           <Field label="Business hours"><input value={settings.hours} placeholder="Open 9 AM – 9 PM · 7 days a week" onChange={(event) => onChange({ ...settings, hours: event.target.value })} /></Field>
           <Field label="Default GST rate"><span className="percent-input"><input inputMode="decimal" value={settings.taxRate} onChange={(event) => onChange({ ...settings, taxRate: Math.max(0, Number(event.target.value) || 0) })} /><span>%</span></span></Field>
         </section>
-        <aside className="storage-note"><GearIcon /><div><strong>Device-only storage</strong><span>Invoices are saved in this browser. Cloud backup and multi-device access are not included yet.</span></div></aside>
+        <CloudStatusNote status={syncStatus} />
+        {userEmail && (
+          <section className="account-card">
+            <div><strong>Signed in</strong><span>{userEmail}</span></div>
+            <button className="text-button" type="button" onClick={onSignOut}><ExitIcon /> Sign out</button>
+          </section>
+        )}
       </main>
       <BottomNavigation active="settings" onChange={onNavigate} />
     </div>
@@ -843,22 +973,101 @@ async function shareInvoicePdf(invoice: Invoice, settings: BusinessSettings) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
 }
 
-export default function Prototype() {
+function InvoiceApplication({ session, onSignOut }: { session: Session | null; onSignOut?: () => void }) {
+  const cloudEnabled = Boolean(session);
   const [screen, setScreen] = useState<Screen>("dashboard");
   const [invoices, setInvoices] = useState<Invoice[]>(loadInvoices);
   const [settings, setSettings] = useState<BusinessSettings>(loadSettings);
   const [activeInvoice, setActiveInvoice] = useState<Invoice | null>(null);
   const [reviewOrigin, setReviewOrigin] = useState<"editor" | "list">("editor");
+  const [cloudReady, setCloudReady] = useState(!cloudEnabled);
+  const [syncStatus, setSyncStatus] = useState<"local" | "loading" | "saving" | "synced" | "error">(cloudEnabled ? "loading" : "local");
+  const [creatingInvoice, setCreatingInvoice] = useState(false);
 
   useEffect(() => { localStorage.setItem(STORAGE_KEY, JSON.stringify(invoices)); }, [invoices]);
   useEffect(() => { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }, [settings]);
 
-  const nextSequence = invoices.length + 1;
+  useEffect(() => {
+    if (!cloudEnabled) return;
+    let cancelled = false;
+    const localInvoices = loadInvoices();
+    const localSettings = loadSettings();
+
+    void loadCloudState<Invoice, BusinessSettings>()
+      .then(async (cloud) => {
+        if (cancelled) return;
+        const mergedInvoices = await mergeLocalInvoicesWithCloud(localInvoices, cloud.invoices);
+        if (!cancelled) setInvoices(mergedInvoices);
+
+        if (cloud.settings) {
+          setSettings({ ...DEFAULT_SETTINGS, ...cloud.settings });
+        } else {
+          await saveCloudSettings(localSettings);
+          setSettings(localSettings);
+        }
+
+        if (!cancelled) {
+          setCloudReady(true);
+          setSyncStatus("synced");
+        }
+      })
+      .catch((reason) => {
+        console.error("Cloud initialization failed", reason);
+        if (!cancelled) {
+          setCloudReady(true);
+          setSyncStatus("error");
+        }
+      });
+
+    return () => { cancelled = true; };
+  }, [cloudEnabled]);
+
+  useEffect(() => {
+    if (!cloudEnabled || !cloudReady) return;
+    const timeout = window.setTimeout(() => {
+      setSyncStatus("saving");
+      void saveCloudSettings(settings)
+        .then(() => setSyncStatus("synced"))
+        .catch((reason) => {
+          console.error("Cloud settings save failed", reason);
+          setSyncStatus("error");
+        });
+    }, 500);
+    return () => window.clearTimeout(timeout);
+  }, [cloudEnabled, cloudReady, settings]);
+
+  const persistInvoice = (invoice: Invoice) => {
+    if (!cloudEnabled) return;
+    setSyncStatus("saving");
+    void saveCloudInvoice(invoice)
+      .then(() => setSyncStatus("synced"))
+      .catch((reason) => {
+        console.error("Cloud invoice save failed", reason);
+        setSyncStatus("error");
+      });
+  };
+
   const navigate = (next: Screen) => setScreen(next);
-  const startInvoice = () => {
-    setActiveInvoice(createInvoice(nextSequence, settings.taxRate));
-    setReviewOrigin("editor");
-    setScreen("editor");
+  const startInvoice = async () => {
+    if (creatingInvoice || (cloudEnabled && !cloudReady)) return;
+    setCreatingInvoice(true);
+    try {
+      const draft = createInvoice(cloudEnabled ? "" : nextLocalInvoiceNumber(), settings.taxRate);
+      const invoice = cloudEnabled
+        ? { ...draft, number: await createCloudInvoiceDraft(draft) }
+        : draft;
+      setActiveInvoice(invoice);
+      setInvoices((current) => [invoice, ...current.filter((item) => item.id !== invoice.id)]);
+      setReviewOrigin("editor");
+      setSyncStatus(cloudEnabled ? "synced" : "local");
+      setScreen("editor");
+    } catch (reason) {
+      console.error("Invoice number reservation failed", reason);
+      setSyncStatus("error");
+      window.alert("The next invoice number could not be reserved. Check the internet connection and try again.");
+    } finally {
+      setCreatingInvoice(false);
+    }
   };
   const openInvoice = (invoice: Invoice) => {
     setActiveInvoice({ ...invoice, customer: { ...invoice.customer }, items: invoice.items.map((item) => ({ ...item })) });
@@ -869,6 +1078,7 @@ export default function Prototype() {
     const saved = { ...invoice, status: status ?? invoice.status };
     setActiveInvoice(saved);
     setInvoices((current) => [saved, ...current.filter((item) => item.id !== saved.id)]);
+    persistInvoice(saved);
     return saved;
   };
 
@@ -876,15 +1086,50 @@ export default function Prototype() {
     return <InvoiceEditor invoice={activeInvoice} onChange={setActiveInvoice} onBack={() => setScreen("dashboard")} onSaveDraft={() => { saveInvoice(activeInvoice, "Draft"); setScreen("dashboard"); }} onReview={() => { setReviewOrigin("editor"); setScreen("review"); }} />;
   }
   if (screen === "review" && activeInvoice) {
-    return <ReviewInvoice invoice={activeInvoice} settings={settings} onChange={setActiveInvoice} onBack={() => setScreen(reviewOrigin === "editor" ? "editor" : "invoices")} onEdit={() => { setReviewOrigin("editor"); setScreen("editor"); }} onDelete={() => { setInvoices((current) => current.filter((invoice) => invoice.id !== activeInvoice.id)); setActiveInvoice(null); setScreen("dashboard"); }} onSignature={() => setScreen("signature")} onSave={() => { const saved = saveInvoice(activeInvoice, activeInvoice.status === "Draft" ? "Unpaid" : activeInvoice.status); setActiveInvoice(saved); setScreen("success"); }} onShare={() => void shareInvoicePdf(activeInvoice, settings)} />;
+    return <ReviewInvoice invoice={activeInvoice} settings={settings} onChange={setActiveInvoice} onBack={() => setScreen(reviewOrigin === "editor" ? "editor" : "invoices")} onEdit={() => { setReviewOrigin("editor"); setScreen("editor"); }} onDelete={() => { setInvoices((current) => current.filter((invoice) => invoice.id !== activeInvoice.id)); if (cloudEnabled) void deleteCloudInvoice(activeInvoice.id).catch((reason) => { console.error("Cloud invoice delete failed", reason); setSyncStatus("error"); }); setActiveInvoice(null); setScreen("dashboard"); }} onSignature={() => setScreen("signature")} onSave={() => { const saved = saveInvoice(activeInvoice, activeInvoice.status === "Draft" ? "Unpaid" : activeInvoice.status); setActiveInvoice(saved); setScreen("success"); }} onShare={() => void shareInvoicePdf(activeInvoice, settings)} />;
   }
   if (screen === "signature" && activeInvoice) {
     return <SignatureScreen invoice={activeInvoice} onBack={() => setScreen("review")} onComplete={(name) => { const signed = { ...activeInvoice, signature: name, signedAt: localDate(), status: activeInvoice.status === "Paid" ? "Paid" : "Unpaid" as InvoiceStatus }; saveInvoice(signed); setScreen("success"); }} />;
   }
   if (screen === "success" && activeInvoice) {
-    return <SuccessScreen invoice={activeInvoice} onShare={() => void shareInvoicePdf(activeInvoice, settings)} onDone={() => { setActiveInvoice(null); setScreen("dashboard"); }} />;
+    return <SuccessScreen invoice={activeInvoice} cloudEnabled={cloudEnabled} onShare={() => void shareInvoicePdf(activeInvoice, settings)} onDone={() => { setActiveInvoice(null); setScreen("dashboard"); }} />;
   }
-  if (screen === "invoices") return <InvoicesScreen invoices={invoices} onNew={startInvoice} onOpen={openInvoice} onNavigate={navigate} />;
-  if (screen === "settings") return <SettingsScreen settings={settings} onChange={setSettings} onNavigate={navigate} />;
-  return <Dashboard invoices={invoices} onNew={startInvoice} onOpen={openInvoice} onNavigate={navigate} />;
+  if (screen === "invoices") return <InvoicesScreen invoices={invoices} onNew={() => void startInvoice()} onOpen={openInvoice} onNavigate={navigate} />;
+  if (screen === "settings") return <SettingsScreen settings={settings} syncStatus={syncStatus} userEmail={session?.user.email} onChange={setSettings} onNavigate={navigate} onSignOut={onSignOut} />;
+  return <Dashboard invoices={invoices} onNew={() => void startInvoice()} onOpen={openInvoice} onNavigate={navigate} syncStatus={syncStatus} />;
+}
+
+export default function Prototype() {
+  const [session, setSession] = useState<Session | null>(null);
+  const [authReady, setAuthReady] = useState(!isCloudConfigured);
+
+  useEffect(() => {
+    if (!isCloudConfigured) return;
+    let active = true;
+    void getCloudSession()
+      .then((current) => {
+        if (active) {
+          setSession(current);
+          setAuthReady(true);
+        }
+      })
+      .catch((reason) => {
+        console.error("Cloud session could not be loaded", reason);
+        if (active) setAuthReady(true);
+      });
+    const unsubscribe = watchCloudSession((current) => {
+      setSession(current);
+      setAuthReady(true);
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
+
+  if (!authReady) {
+    return <div className="auth-page"><main className="auth-card auth-loading"><BrandLockup /><p>Opening secure invoices…</p></main></div>;
+  }
+  if (isCloudConfigured && !session) return <AuthenticationScreen />;
+  return <InvoiceApplication session={session} onSignOut={isCloudConfigured ? () => { void signOutCloud(); } : undefined} />;
 }
